@@ -1,240 +1,118 @@
 <?php
-
-// Define socket server details - these should match client.php
 define('SOCKET_ADDRESS', '127.0.0.1');
 define('SOCKET_PORT', 8888);
-
-// Include database connection
 require_once 'database.php';
-
-// Set time limit to infinity
 set_time_limit(0);
 
-// Create a socket
 $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-if ($socket === false) {
-    echo "Socket creation failed: " . socket_strerror(socket_last_error()) . "\n";
-    exit(1);
-}
-
-// Set socket options
 socket_set_option($socket, SOL_SOCKET, SO_REUSEADDR, 1);
-
-// Bind the socket to an address and port
-if (!socket_bind($socket, SOCKET_ADDRESS, SOCKET_PORT)) {
-    echo "Socket binding failed: " . socket_strerror(socket_last_error($socket)) . "\n";
-    exit(1);
-}
-
-// Start listening for connections
-if (!socket_listen($socket)) {
-    echo "Socket listen failed: " . socket_strerror(socket_last_error($socket)) . "\n";
-    exit(1);
-}
+socket_bind($socket, SOCKET_ADDRESS, SOCKET_PORT);
+socket_listen($socket);
 
 echo "Server started on " . SOCKET_ADDRESS . ":" . SOCKET_PORT . "\n";
-echo "Waiting for connections...\n";
 
-// Array to hold client sockets
 $clients = [$socket];
 
 while (true) {
-    // Create a copy of the clients array
     $read = $clients;
     $write = null;
     $except = null;
 
-    // Check for socket activity
-    if (socket_select($read, $write, $except, null) === false) {
-        echo "Socket select failed: " . socket_strerror(socket_last_error()) . "\n";
-        break;
-    }
+    if (socket_select($read, $write, $except, null) === false) break;
 
-    // Check if there is a new connection request
     if (in_array($socket, $read)) {
-        // Accept the new connection
         $new_client = socket_accept($socket);
         $clients[] = $new_client;
-
-        // Send welcome message to the new client
-        $welcome_message = "Welcome to the Food Menu Server!\n";
-
-        socket_write($new_client, $welcome_message, strlen($welcome_message));
-
-        echo "New client connected\n";
-
-        // Remove the server socket from the read array
+        $msg = "Connected\n";
+        socket_write($new_client, $msg, strlen($msg));
         $key = array_search($socket, $read);
         unset($read[$key]);
     }
 
-    // Handle client messages
     foreach ($read as $client) {
-        // Read client message
-        $message = socket_read($client, 1024);
+        $message = @socket_read($client, 2048);
 
-        // Check if client disconnected
         if ($message === false || $message === '') {
-            // Remove client from array
             $key = array_search($client, $clients);
             unset($clients[$key]);
             socket_close($client);
             continue;
         }
 
-        // Process message
         $response = processRequest($message, $pdo);
-
-        // Send response back to the client
         socket_write($client, $response, strlen($response));
-
-        // Broadcast updates to all other clients
-        foreach ($clients as $send_client) {
-            if ($send_client !== $socket && $send_client !== $client) {
-                socket_write($send_client, "REFRESH", strlen("REFRESH"));
-            }
-        }
     }
 }
 
-// Close the socket
 socket_close($socket);
 
-function processRequest($message, $pdo)
-{
+function processRequest($message, $pdo) {
     $data = json_decode($message, true);
-
-    if (!isset($data['action'])) {
-        return "Error: No action specified";
-    }
+    if (!isset($data['action'])) return "Error: No action";
 
     switch ($data['action']) {
-        case 'create':
-            return createMenuItem($data, $pdo);
-
-        case 'read':
-            return getMenuItems($pdo);
-
-        case 'update':
-            return updateMenuItem($data, $pdo);
-
-        case 'delete':
-            return deleteMenuItem($data, $pdo);
-
-        default:
-            return "Error: Unknown action '{$data['action']}'";
+        case 'create': return createMenuItem($data, $pdo);
+        case 'read': return getMenuItems($pdo);
+        case 'update': return updateMenuItem($data, $pdo);
+        case 'delete': return deleteMenuItem($data, $pdo);
+        default: return "Error: Unknown action";
     }
 }
 
-/**
- * Create a new menu item
- */
-function createMenuItem($data, $pdo)
-{
-    if (!isset($data['name']) || !isset($data['price'])) {
-        return "Error: Name and price are required";
-    }
-
+function createMenuItem($data, $pdo) {
     try {
-        $stmt = $pdo->prepare("INSERT INTO menu_items (name, description, price) VALUES (?, ?, ?)");
+        $stmt = $pdo->prepare("INSERT INTO menu_items (name, category, description, price, stock_quantity, image_path) VALUES (?, ?, ?, ?, ?, ?)");
         $stmt->execute([
             $data['name'],
+            $data['category'] ?? 'General',
             $data['description'] ?? '',
-            $data['price']
+            $data['price'],
+            $data['stock_quantity'] ?? 0,
+            $data['image_path'] ?? null
         ]);
-
-        return "Menu item '{$data['name']}' created successfully";
-    } catch (PDOException $e) {
-        return "Error creating menu item: " . $e->getMessage();
-    }
+        return "Item created";
+    } catch (PDOException $e) { return "Error: " . $e->getMessage(); }
 }
 
-/**
- * Update a menu item
- */
-function updateMenuItem($data, $pdo)
-{
-    if (!isset($data['id'])) {
-        return "Error: Item ID is required";
-    }
-
+function updateMenuItem($data, $pdo) {
     try {
         $fields = [];
         $values = [];
+        // Dynamic update builder
+        if (isset($data['name'])) { $fields[] = "name=?"; $values[] = $data['name']; }
+        if (isset($data['category'])) { $fields[] = "category=?"; $values[] = $data['category']; }
+        if (isset($data['description'])) { $fields[] = "description=?"; $values[] = $data['description']; }
+        if (isset($data['price'])) { $fields[] = "price=?"; $values[] = $data['price']; }
+        if (isset($data['stock_quantity'])) { $fields[] = "stock_quantity=?"; $values[] = $data['stock_quantity']; }
+        if (isset($data['image_path'])) { $fields[] = "image_path=?"; $values[] = $data['image_path']; }
 
-        if (isset($data['name'])) {
-            $fields[] = "name = ?";
-            $values[] = $data['name'];
-        }
-
-        if (isset($data['description'])) {
-            $fields[] = "description = ?";
-            $values[] = $data['description'];
-        }
-
-        if (isset($data['price'])) {
-            $fields[] = "price = ?";
-            $values[] = $data['price'];
-        }
-
-        if (empty($fields)) {
-            return "Error: No fields to update";
-        }
-
+        if (empty($fields)) return "No changes";
         $values[] = $data['id'];
 
-        $sql = "UPDATE menu_items SET " . implode(", ", $fields) . " WHERE id = ?";
+        $sql = "UPDATE menu_items SET " . implode(", ", $fields) . " WHERE id=?";
         $stmt = $pdo->prepare($sql);
         $stmt->execute($values);
-
-        if ($stmt->rowCount() > 0) {
-            return "Menu item updated successfully";
-        } else {
-            return "No changes made or item not found";
-        }
-    } catch (PDOException $e) {
-        return "Error updating menu item: " . $e->getMessage();
-    }
+        return $stmt->rowCount() > 0 ? "Item updated" : "No changes made";
+    } catch (PDOException $e) { return "Error: " . $e->getMessage(); }
 }
 
-/**
- * Delete a menu item
- */
-function deleteMenuItem($data, $pdo)
-{
-    if (!isset($data['id'])) {
-        return "Error: Item ID is required";
-    }
-
+function deleteMenuItem($data, $pdo) {
     try {
-        $stmt = $pdo->prepare("DELETE FROM menu_items WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT image_path FROM menu_items WHERE id=?");
         $stmt->execute([$data['id']]);
+        $item = $stmt->fetch();
+        if ($item && $item['image_path'] && file_exists($item['image_path'])) unlink($item['image_path']);
 
-        if ($stmt->rowCount() > 0) {
-            return "Menu item deleted successfully";
-        } else {
-            return "Item not found";
-        }
-    } catch (PDOException $e) {
-        return "Error deleting menu item: " . $e->getMessage();
-    }
+        $stmt = $pdo->prepare("DELETE FROM menu_items WHERE id=?");
+        $stmt->execute([$data['id']]);
+        return "Item deleted";
+    } catch (PDOException $e) { return "Error: " . $e->getMessage(); }
 }
 
-function getMenuItems($pdo)
-{
+function getMenuItems($pdo) {
     try {
-        $stmt = $pdo->query("SELECT id, name, description, price, created_at FROM menu_items ORDER BY created_at DESC");
-        $items = $stmt->fetchAll();
-
-        return json_encode([
-            'status' => 'success',
-            'data' => $items
-        ]);
-    } catch (PDOException $e) {
-        return json_encode([
-            'status' => 'error',
-            'message' => "Error retrieving menu items: " . $e->getMessage()
-        ]);
-    }
+        $stmt = $pdo->query("SELECT * FROM menu_items ORDER BY created_at DESC");
+        return json_encode(['status' => 'success', 'data' => $stmt->fetchAll()]);
+    } catch (PDOException $e) { return json_encode(['status' => 'error', 'message' => $e->getMessage()]); }
 }
 ?>
