@@ -1,71 +1,112 @@
 <?php
+// server.php
 
-// Ctrl+I to chat, Ctrl+K to generate
-
-// Define socket server details - these should match client.php
+// Define socket details
 define('SOCKET_ADDRESS', '127.0.0.1');
 define('SOCKET_PORT', 8888);
 
-// Include database connection
 require_once 'database.php';
 
-// Set time limit to infinity
-set_time_limit(seconds: 0);
+// No time limit so the server runs forever
+set_time_limit(0);
 
-// Create a socket
-$socket = socket_create(domain: AF_INET, type: SOCK_STREAM, protocol: SOL_TCP);
-if ($socket === false) {
-    echo "Socket creation failed: " . socket_strerror(error_code: socket_last_error()) . "\n";
-    exit(1);
+// Enable implicit flushing so we see output in the console immediately
+ob_implicit_flush();
+
+$socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+socket_set_option($socket, SOL_SOCKET, SO_REUSEADDR, 1);
+
+if (!socket_bind($socket, SOCKET_ADDRESS, SOCKET_PORT)) {
+    die("Bind failed: " . socket_strerror(socket_last_error($socket)));
 }
 
-// Set socket options
-socket_set_option(socket: $socket, level: SOL_SOCKET, option: SO_REUSEADDR, value: 1);
-
-// Bind the socket to an address and port
-if (!socket_bind(socket: $socket, address: SOCKET_ADDRESS, port: SOCKET_PORT)) {
-    echo "Socket binding failed: " . socket_strerror(error_code: socket_last_error(socket: $socket)) . "\n";
-    exit(1);
-}
-
-// Start listening for connections
-if (!socket_listen(socket: $socket)) {
-    echo "Socket listen failed: " . socket_strerror(error_code: socket_last_error(socket: $socket)) . "\n";
-    exit(1);
+if (!socket_listen($socket)) {
+    die("Listen failed: " . socket_strerror(socket_last_error($socket)));
 }
 
 echo "Server started on " . SOCKET_ADDRESS . ":" . SOCKET_PORT . "\n";
 echo "Waiting for connections...\n";
 
-// Array to hold client sockets
 $clients = [$socket];
 
 while (true) {
-    // Create a copy of the clients array
     $read = $clients;
     $write = null;
     $except = null;
 
-    // Check for socket activity
-    if (socket_select(read: $read, write: $write, except: $except, seconds: null) === false) {
-        echo "Socket select failed: " . socket_strerror(error_code: socket_last_error()) . "\n";
-        break;
+    // Monitor all sockets for changes
+    if (socket_select($read, $write, $except, 0) < 1) {
+        continue;
     }
 
-    // Check if there is a new connection request
-    if (in_array(needle: $socket, haystack: $read)) {
-        // Accept the new connection
-        $new_client = socket_accept(socket: $socket);
+    // Check if there's a new client connection
+    if (in_array($socket, $read)) {
+        $new_client = socket_accept($socket);
         $clients[] = $new_client;
 
-        // Send welcome message to the new client
-        $welcome_message = "Welcome to the Food Menu Server!\n";
-        socket_write(socket: $new_client, data: $welcome_message, length: strlen(string: $welcome_message));
+        // Send welcome message
+        $msg = "Connected to Server successfully!";
+        socket_write($new_client, $msg, strlen($msg));
+        
+        echo "New client connected.\n";
 
-        echo "New client connected\n";
-
-        // Remove the server socket from the read array
-        $key = array_search(needle: $socket, haystack: $read);
+        // Remove the listening socket from the list of sockets to read from
+        $key = array_search($socket, $read);
         unset($read[$key]);
     }
+
+    // Check each client for data
+    foreach ($read as $client_sock) {
+        // Read data from client
+        $data = @socket_read($client_sock, 2048);
+
+        // If data is empty, client disconnected
+        if ($data === false || $data === '') {
+            $key = array_search($client_sock, $clients);
+            unset($clients[$key]);
+            echo "Client disconnected.\n";
+            continue;
+        }
+
+        $data = trim($data);
+        if (!empty($data)) {
+            echo "Received request: $data\n";
+            
+            // Default response
+            $response = ['status' => 'error', 'message' => 'Invalid request'];
+            $request = json_decode($data, true);
+
+            if ($request && isset($request['action'])) {
+                // HANDLE READ
+                if ($request['action'] === 'read') {
+                    try {
+                        $stmt = $pdo->query("SELECT * FROM menu_items ORDER BY created_at DESC");
+                        $items = $stmt->fetchAll();
+                        $response = ['status' => 'success', 'data' => $items];
+                    } catch (Exception $e) {
+                        $response = ['status' => 'error', 'message' => $e->getMessage()];
+                    }
+                }
+                // HANDLE CREATE
+                elseif ($request['action'] === 'create') {
+                    $name = $request['name'] ?? '';
+                    $desc = $request['description'] ?? '';
+                    $price = $request['price'] ?? 0;
+                    
+                    try {
+                        $stmt = $pdo->prepare("INSERT INTO menu_items (name, description, price) VALUES (?, ?, ?)");
+                        $stmt->execute([$name, $desc, $price]);
+                        $response = ['status' => 'success', 'message' => 'Item created'];
+                    } catch (Exception $e) {
+                        $response = ['status' => 'error', 'message' => $e->getMessage()];
+                    }
+                }
+            }
+
+            // Send JSON response back to client
+            $output = json_encode($response);
+            socket_write($client_sock, $output, strlen($output));
+        }
+    }
 }
+?>
